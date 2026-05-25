@@ -1,156 +1,251 @@
-# ============================================================
-#  Indian Railways Sites - Permission & Cache Reset Tool
-#  Sites: AIMS, IREPS, IRWCMS
-#  Usage: iwr -useb https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/Reset-RailwaySites.ps1 | iex
-# ============================================================
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Clears browser cache and resets/pre-approves permissions for Indian Railways websites.
 
-$railwaySites = @(
+.DESCRIPTION
+    This script:
+      - Closes Chrome and Edge if running
+      - Clears Cache, Code Cache, and Network Cache for both browsers
+      - Removes old permission entries for the 3 Railway sites
+      - Pre-sets "Access other apps and services" (window_placement) to ALLOW
+        so the popup never appears again
+
+    Target Sites:
+      * https://aims.indianrailways.gov.in  (AIMS / IPAS)
+      * https://www.ireps.gov.in            (IREPS)
+      * https://ircep.gov.in                (IRWCMS)
+
+.NOTES
+    Author  : Indian Railways IT Utility
+    Version : 2.0
+    Run As  : Administrator (recommended)
+
+.EXAMPLE
+    Right-click Reset-RailwaySites.ps1 -> Run with PowerShell
+    OR from an elevated PowerShell prompt:
+    .\Reset-RailwaySites.ps1
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'SilentlyContinue'
+
+# ─────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────
+$SiteKeys = @(
     'aims.indianrailways.gov.in',
     'www.ireps.gov.in',
     'ircep.gov.in'
 )
 
+# Keys used inside browser Preferences JSON for window_placement
+$SitePermissionKeys = @(
+    'https://aims.indianrailways.gov.in:443,*',
+    'https://www.ireps.gov.in:443,*',
+    'https://ircep.gov.in:443,*'
+)
+
+$PermissionTypesToClear = @(
+    'cookies', 'images', 'javascript', 'notifications',
+    'geolocation', 'media_stream_mic', 'media_stream_camera',
+    'window_placement', 'popups', 'automatic_downloads'
+)
+
+$ChromeProfile = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
+$EdgeProfile   = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default"
+
+# ─────────────────────────────────────────────
+# HELPER FUNCTIONS
+# ─────────────────────────────────────────────
 function Write-Header {
     Write-Host ""
     Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "  Indian Railways Sites - Reset Tool" -ForegroundColor Green
-    Write-Host "  Sites: AIMS, IREPS, IRWCMS" -ForegroundColor Green
+    Write-Host "  Indian Railways Sites - Reset & Fix Tool" -ForegroundColor Cyan
+    Write-Host "  Sites: AIMS | IREPS | IRWCMS" -ForegroundColor Cyan
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
 }
 
-function Stop-Browser {
-    param([string]$ProcessName, [string]$BrowserName)
-    $proc = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
-    if ($proc) {
-        Write-Host "[WARNING] $BrowserName is currently running. Closing it now..." -ForegroundColor Yellow
+function Write-Step {
+    param([string]$Number, [string]$Message)
+    Write-Host "[$Number] $Message" -ForegroundColor Yellow
+}
+
+function Write-OK    { param([string]$m) Write-Host "        [OK]   $m" -ForegroundColor Green }
+function Write-Skip  { param([string]$m) Write-Host "        [SKIP] $m" -ForegroundColor DarkGray }
+function Write-Info  { param([string]$m) Write-Host "        [-]    $m" -ForegroundColor White }
+function Write-Warn  { param([string]$m) Write-Host "        [WARN] $m" -ForegroundColor Magenta }
+
+# ─────────────────────────────────────────────
+# CLOSE BROWSERS
+# ─────────────────────────────────────────────
+function Close-Browser {
+    param([string]$ProcessName, [string]$DisplayName)
+
+    $running = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Warn "$DisplayName is running. Closing it now..."
         Stop-Process -Name $ProcessName -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
-        Write-Host "[INFO] $BrowserName has been closed." -ForegroundColor Green
-        Write-Host ""
+        Write-OK "$DisplayName closed."
     }
 }
 
+# ─────────────────────────────────────────────
+# CLEAR BROWSER CACHE FOLDERS
+# ─────────────────────────────────────────────
 function Clear-BrowserCache {
     param([string]$ProfilePath, [string]$BrowserName)
 
     if (-not (Test-Path $ProfilePath)) {
-        Write-Host "      [SKIP] $BrowserName profile not found. $BrowserName may not be installed." -ForegroundColor DarkGray
+        Write-Skip "$BrowserName profile not found. May not be installed."
         return
     }
 
-    $cacheFolders = @("Cache", "Code Cache", "Network")
+    $cacheFolders = @('Cache', 'Code Cache', 'Network')
     foreach ($folder in $cacheFolders) {
-        $path = Join-Path $ProfilePath $folder
-        if (Test-Path $path) {
-            Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "       - $folder cleared" -ForegroundColor Gray
+        $fullPath = Join-Path $ProfilePath $folder
+        if (Test-Path $fullPath) {
+            Remove-Item -Path $fullPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Info "$folder cleared"
         }
     }
-    Write-Host "      [DONE] $BrowserName cache cleared successfully." -ForegroundColor Green
+    Write-OK "$BrowserName cache cleared successfully."
 }
 
-function Reset-SitePermissions {
-    param([string]$PrefsPath, [string]$BrowserName)
+# ─────────────────────────────────────────────
+# RESET PERMISSIONS + PRE-SET window_placement = ALLOW
+# ─────────────────────────────────────────────
+function Set-BrowserPermissions {
+    param([string]$ProfilePath, [string]$BrowserName)
 
-    if (-not (Test-Path $PrefsPath)) {
-        Write-Host "      [SKIP] $BrowserName Preferences file not found." -ForegroundColor DarkGray
+    $PrefsFile = Join-Path $ProfilePath 'Preferences'
+
+    if (-not (Test-Path $PrefsFile)) {
+        Write-Skip "$BrowserName Preferences file not found."
         return
     }
 
     # Backup
-    $backupPath = "$PrefsPath.backup"
-    Copy-Item -Path $PrefsPath -Destination $backupPath -Force -ErrorAction SilentlyContinue
-    Write-Host "       - Preferences backup created ($BrowserName Preferences.backup)" -ForegroundColor Gray
+    $BackupFile = "$PrefsFile.backup"
+    Copy-Item -Path $PrefsFile -Destination $BackupFile -Force
+    Write-Info "Backup saved: Preferences.backup"
 
     try {
-        $prefsRaw = Get-Content $PrefsPath -Raw -Encoding UTF8
-        $prefs = $prefsRaw | ConvertFrom-Json
+        # Load JSON
+        $json = Get-Content -Path $PrefsFile -Raw -Encoding UTF8
+        $prefs = $json | ConvertFrom-Json
 
-        $changed = $false
+        # Ensure path exists
+        if (-not $prefs.profile.PSObject.Properties['content_settings']) {
+            $prefs.profile | Add-Member -NotePropertyName 'content_settings' -NotePropertyValue ([PSCustomObject]@{}) -Force
+        }
+        if (-not $prefs.profile.content_settings.PSObject.Properties['exceptions']) {
+            $prefs.profile.content_settings | Add-Member -NotePropertyName 'exceptions' -NotePropertyValue ([PSCustomObject]@{}) -Force
+        }
 
-        if ($prefs.profile.content_settings.exceptions) {
-            $cs = $prefs.profile.content_settings.exceptions
-            $cs.PSObject.Properties | ForEach-Object {
-                $entries = $_.Value
-                if ($entries -is [PSCustomObject]) {
-                    $keys = @($entries.PSObject.Properties.Name)
-                    foreach ($key in $keys) {
-                        foreach ($site in $railwaySites) {
-                            if ($key -like "*$site*") {
-                                $entries.PSObject.Properties.Remove($key)
-                                $changed = $true
-                            }
+        $cs = $prefs.profile.content_settings.exceptions
+
+        # ── Step 1: Remove old entries for all 3 sites across all permission types ──
+        foreach ($permType in $PermissionTypesToClear) {
+            if ($cs.PSObject.Properties[$permType]) {
+                $entries = $cs.PSObject.Properties[$permType].Value
+                $keys = @($entries.PSObject.Properties.Name)
+                foreach ($key in $keys) {
+                    foreach ($siteKey in $SiteKeys) {
+                        if ($key -like "*$siteKey*") {
+                            $entries.PSObject.Properties.Remove($key)
                         }
                     }
                 }
             }
         }
+        Write-Info "Old permission entries removed for all 3 sites."
 
-        if ($changed) {
-            $prefs | ConvertTo-Json -Depth 100 | Set-Content $PrefsPath -Encoding UTF8
-            Write-Host "      [DONE] $BrowserName permissions reset for Railway sites." -ForegroundColor Green
-        } else {
-            Write-Host "      [INFO] No Railway site permissions found in $BrowserName (nothing to reset)." -ForegroundColor Cyan
+        # ── Step 2: Pre-set window_placement = 1 (ALLOW) for all 3 sites ──
+        if (-not $cs.PSObject.Properties['window_placement']) {
+            $cs | Add-Member -NotePropertyName 'window_placement' -NotePropertyValue ([PSCustomObject]@{}) -Force
         }
-    }
-    catch {
-        Write-Host "      [ERROR] Failed to parse $BrowserName Preferences: $_" -ForegroundColor Red
+
+        $wp = $cs.window_placement
+        foreach ($siteEntry in $SitePermissionKeys) {
+            $permEntry = [PSCustomObject]@{
+                last_modified = '13000000000000000'
+                setting       = 1   # 1 = Allow, 2 = Block
+            }
+            $wp | Add-Member -NotePropertyName $siteEntry -NotePropertyValue $permEntry -Force
+        }
+        Write-Info "window_placement set to ALLOW for all 3 sites."
+
+        # ── Save ──
+        $prefs | ConvertTo-Json -Depth 100 | Set-Content -Path $PrefsFile -Encoding UTF8
+        Write-OK "$BrowserName permissions fixed — 'Access to apps/services' = ALLOWED."
+
+    } catch {
+        Write-Warn "Could not update $BrowserName Preferences: $_"
+        Write-Info "Restoring backup..."
+        Copy-Item -Path $BackupFile -Destination $PrefsFile -Force
     }
 }
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# SUMMARY FOOTER
+# ─────────────────────────────────────────────
+function Write-Summary {
+    Write-Host ""
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  ALL DONE! Summary" -ForegroundColor Cyan
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Cache Cleared       : Chrome & Edge" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Permissions fixed for:" -ForegroundColor Green
+    Write-Host "    * https://aims.indianrailways.gov.in" -ForegroundColor White
+    Write-Host "    * https://www.ireps.gov.in" -ForegroundColor White
+    Write-Host "    * https://ircep.gov.in" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [ALLOWED] Access to other apps & services" -ForegroundColor Green
+    Write-Host "            No more Allow/Block popup!" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Backup : Preferences.backup (Chrome & Edge)" -ForegroundColor DarkGray
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Open Chrome or Edge and visit the sites." -ForegroundColor Yellow
+    Write-Host "  Enjoy Work!" -ForegroundColor Yellow
+    Write-Host ""
+}
 
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
 Write-Header
 
-# Close browsers
-Stop-Browser -ProcessName "chrome"   -BrowserName "Google Chrome"
-Stop-Browser -ProcessName "msedge"   -BrowserName "Microsoft Edge"
-
-# Chrome paths
-$chromePath  = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
-$chromePrefs = "$chromePath\Preferences"
-
-# Edge paths
-$edgePath    = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default"
-$edgePrefs   = "$edgePath\Preferences"
-
-# 1. Chrome Cache
-Write-Host "[1/4] Clearing Google Chrome cache..." -ForegroundColor Cyan
-Clear-BrowserCache -ProfilePath $chromePath -BrowserName "Chrome"
+# Step 0 — Close browsers
+Write-Step "0/4" "Checking for running browsers..."
+Close-Browser -ProcessName 'chrome'  -DisplayName 'Google Chrome'
+Close-Browser -ProcessName 'msedge'  -DisplayName 'Microsoft Edge'
 Write-Host ""
 
-# 2. Chrome Permissions
-Write-Host "[2/4] Resetting Chrome site permissions for Railway sites..." -ForegroundColor Cyan
-Reset-SitePermissions -PrefsPath $chromePrefs -BrowserName "Chrome"
+# Step 1 — Chrome cache
+Write-Step "1/4" "Clearing Google Chrome cache..."
+Clear-BrowserCache -ProfilePath $ChromeProfile -BrowserName 'Chrome'
 Write-Host ""
 
-# 3. Edge Cache
-Write-Host "[3/4] Clearing Microsoft Edge cache..." -ForegroundColor Cyan
-Clear-BrowserCache -ProfilePath $edgePath -BrowserName "Edge"
+# Step 2 — Chrome permissions
+Write-Step "2/4" "Fixing Chrome permissions for Railway sites..."
+Set-BrowserPermissions -ProfilePath $ChromeProfile -BrowserName 'Chrome'
 Write-Host ""
 
-# 4. Edge Permissions
-Write-Host "[4/4] Resetting Edge site permissions for Railway sites..." -ForegroundColor Cyan
-Reset-SitePermissions -PrefsPath $edgePrefs -BrowserName "Edge"
+# Step 3 — Edge cache
+Write-Step "3/4" "Clearing Microsoft Edge cache..."
+Clear-BrowserCache -ProfilePath $EdgeProfile -BrowserName 'Edge'
 Write-Host ""
 
-# Summary
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  ALL DONE! Summary:" -ForegroundColor Green
-Write-Host "  - Chrome cache cleared" -ForegroundColor White
-Write-Host "  - Chrome permissions reset for:" -ForegroundColor White
-foreach ($site in $railwaySites) {
-    Write-Host "      * $site" -ForegroundColor Gray
-}
-Write-Host "  - Edge cache cleared" -ForegroundColor White
-Write-Host "  - Edge permissions reset for same sites" -ForegroundColor White
-Write-Host ""
-Write-Host "  Backup files saved as Preferences.backup" -ForegroundColor DarkGray
-Write-Host "  in your browser profile folders." -ForegroundColor DarkGray
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Now open Chrome or Edge and visit the sites fresh." -ForegroundColor Yellow
-Write-Host ""
-Write-Host "Enjoy Work!" -ForegroundColor Green
-Write-Host ""
+# Step 4 — Edge permissions
+Write-Step "4/4" "Fixing Edge permissions for Railway sites..."
+Set-BrowserPermissions -ProfilePath $EdgeProfile -BrowserName 'Edge'
+
+Write-Summary
+
+Read-Host "Press Enter to exit"
