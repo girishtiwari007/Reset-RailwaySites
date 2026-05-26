@@ -4,27 +4,15 @@
     Clears browser cache and resets/pre-approves permissions for Indian Railways websites.
 
 .DESCRIPTION
-    This script:
-      - Closes Chrome and Edge if running
-      - Clears Cache, Code Cache, and Network Cache for both browsers
-      - Removes old permission entries for the 3 Railway sites
-      - Pre-sets "Access other apps and services" (window_placement) to ALLOW
-        so the popup never appears again
-
+    Supports: Google Chrome, Microsoft Edge, Mozilla Firefox
     Target Sites:
       * https://aims.indianrailways.gov.in  (AIMS / IPAS)
       * https://www.ireps.gov.in            (IREPS)
       * https://ircep.gov.in                (IRWCMS)
 
 .NOTES
-    Author  : Indian Railways IT Utility
-    Version : 2.0
+    Version : 3.0
     Run As  : Administrator (recommended)
-
-.EXAMPLE
-    Right-click Reset-RailwaySites.ps1 -> Run with PowerShell
-    OR from an elevated PowerShell prompt:
-    .\Reset-RailwaySites.ps1
 #>
 
 Set-StrictMode -Version Latest
@@ -39,7 +27,6 @@ $SiteKeys = @(
     'ircep.gov.in'
 )
 
-# Keys used inside browser Preferences JSON for window_placement
 $SitePermissionKeys = @(
     'https://aims.indianrailways.gov.in:443,*',
     'https://www.ireps.gov.in:443,*',
@@ -54,70 +41,120 @@ $PermissionTypesToClear = @(
 
 $ChromeProfile = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
 $EdgeProfile   = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default"
+$FirefoxBase   = "$env:APPDATA\Mozilla\Firefox\Profiles"
 
 # ─────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────
 function Write-Header {
+    Clear-Host
     Write-Host ""
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "  Indian Railways Sites - Reset & Fix Tool" -ForegroundColor Cyan
-    Write-Host "  Sites: AIMS | IREPS | IRWCMS" -ForegroundColor Cyan
-    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  +================================================+" -ForegroundColor Cyan
+    Write-Host "  |   Indian Railways - Browser Reset & Fix Tool   |" -ForegroundColor Cyan
+    Write-Host "  |   AIMS  |  IREPS  |  IRWCMS                   |" -ForegroundColor Cyan
+    Write-Host "  +================================================+" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Sites targeted:" -ForegroundColor White
+    Write-Host "    * https://aims.indianrailways.gov.in" -ForegroundColor DarkCyan
+    Write-Host "    * https://www.ireps.gov.in"           -ForegroundColor DarkCyan
+    Write-Host "    * https://ircep.gov.in"               -ForegroundColor DarkCyan
     Write-Host ""
 }
 
-function Write-Step {
-    param([string]$Number, [string]$Message)
-    Write-Host "[$Number] $Message" -ForegroundColor Yellow
-}
-
-function Write-OK    { param([string]$m) Write-Host "        [OK]   $m" -ForegroundColor Green }
-function Write-Skip  { param([string]$m) Write-Host "        [SKIP] $m" -ForegroundColor DarkGray }
-function Write-Info  { param([string]$m) Write-Host "        [-]    $m" -ForegroundColor White }
-function Write-Warn  { param([string]$m) Write-Host "        [WARN] $m" -ForegroundColor Magenta }
+function Write-Step { param([string]$n,[string]$m) Write-Host "  [$n] $m" -ForegroundColor Yellow }
+function Write-OK   { param([string]$m) Write-Host "        [OK]  $m" -ForegroundColor Green }
+function Write-Skip { param([string]$m) Write-Host "        [--]  $m" -ForegroundColor DarkGray }
+function Write-Info { param([string]$m) Write-Host "        [..]  $m" -ForegroundColor White }
+function Write-Warn { param([string]$m) Write-Host "        [!!]  $m" -ForegroundColor Magenta }
 
 # ─────────────────────────────────────────────
-# CLOSE BROWSERS
+# STEP 0 — DETECT OPEN BROWSERS & WARN USER
 # ─────────────────────────────────────────────
-function Close-Browser {
-    param([string]$ProcessName, [string]$DisplayName)
+function Show-BrowserWarning {
+    $openBrowsers = @()
+    $browserChecks = @(
+        @{ Process = 'chrome';  Name = 'Google Chrome'   },
+        @{ Process = 'msedge';  Name = 'Microsoft Edge'  },
+        @{ Process = 'firefox'; Name = 'Mozilla Firefox' }
+    )
 
-    $running = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
-    if ($running) {
-        Write-Warn "$DisplayName is running. Closing it now..."
-        Stop-Process -Name $ProcessName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        Write-OK "$DisplayName closed."
+    foreach ($b in $browserChecks) {
+        if (Get-Process -Name $b.Process -ErrorAction SilentlyContinue) {
+            $openBrowsers += $b.Name
+        }
     }
+
+    if ($openBrowsers.Count -gt 0) {
+        Write-Host "  +------------------------------------------------+" -ForegroundColor Magenta
+        Write-Host "  |   WARNING: Browsers are currently open!        |" -ForegroundColor Magenta
+        Write-Host "  +------------------------------------------------+" -ForegroundColor Magenta
+        Write-Host ""
+        Write-Host "  Detected running:" -ForegroundColor Yellow
+        foreach ($b in $openBrowsers) {
+            Write-Host "    *  $b" -ForegroundColor White
+        }
+        Write-Host ""
+        Write-Host "  You do NOT have to close them to run this script." -ForegroundColor White
+        Write-Host ""
+        Write-Host "  However, if a browser is open and rewrites its" -ForegroundColor DarkGray
+        Write-Host "  Preferences file on exit, the permission fix may" -ForegroundColor DarkGray
+        Write-Host "  be overwritten. For the best result:" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "    >> Close all browsers, then press Enter <<" -ForegroundColor Cyan
+        Write-Host "    >> OR press Enter now to proceed anyway  <<" -ForegroundColor DarkGray
+        Write-Host ""
+    } else {
+        Write-Host "  [OK] No browsers are currently running. Good to go!" -ForegroundColor Green
+        Write-Host ""
+    }
+
+    Write-Host "  ------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "  This script will ONLY affect these 3 sites:" -ForegroundColor White
+    Write-Host "    * aims.indianrailways.gov.in" -ForegroundColor Cyan
+    Write-Host "    * www.ireps.gov.in"           -ForegroundColor Cyan
+    Write-Host "    * ircep.gov.in"               -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Passwords, bookmarks, history = NOT touched." -ForegroundColor DarkGray
+    Write-Host "  ------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Press ENTER to start the reset   |   Ctrl+C to cancel" -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "  Press Enter"
+    Write-Host ""
 }
 
 # ─────────────────────────────────────────────
-# CLEAR BROWSER CACHE FOLDERS
+# CLEAR CHROMIUM CACHE
 # ─────────────────────────────────────────────
-function Clear-BrowserCache {
+function Clear-ChromiumCache {
     param([string]$ProfilePath, [string]$BrowserName)
 
     if (-not (Test-Path $ProfilePath)) {
-        Write-Skip "$BrowserName profile not found. May not be installed."
+        Write-Skip "$BrowserName profile not found. Not installed or different location."
         return
     }
 
-    $cacheFolders = @('Cache', 'Code Cache', 'Network')
-    foreach ($folder in $cacheFolders) {
+    $cleared = 0
+    foreach ($folder in @('Cache', 'Code Cache', 'Network')) {
         $fullPath = Join-Path $ProfilePath $folder
         if (Test-Path $fullPath) {
             Remove-Item -Path $fullPath -Recurse -Force -ErrorAction SilentlyContinue
             Write-Info "$folder cleared"
+            $cleared++
         }
     }
-    Write-OK "$BrowserName cache cleared successfully."
+
+    if ($cleared -gt 0) {
+        Write-OK "$BrowserName cache cleared ($cleared folder(s) removed)."
+    } else {
+        Write-Skip "$BrowserName — cache already clean."
+    }
 }
 
 # ─────────────────────────────────────────────
-# RESET PERMISSIONS + PRE-SET window_placement = ALLOW
+# FIX CHROMIUM PERMISSIONS
 # ─────────────────────────────────────────────
-function Set-BrowserPermissions {
+function Set-ChromiumPermissions {
     param([string]$ProfilePath, [string]$BrowserName)
 
     $PrefsFile = Join-Path $ProfilePath 'Preferences'
@@ -127,17 +164,12 @@ function Set-BrowserPermissions {
         return
     }
 
-    # Backup
-    $BackupFile = "$PrefsFile.backup"
-    Copy-Item -Path $PrefsFile -Destination $BackupFile -Force
+    Copy-Item -Path $PrefsFile -Destination "$PrefsFile.backup" -Force
     Write-Info "Backup saved: Preferences.backup"
 
     try {
-        # Load JSON
-        $json = Get-Content -Path $PrefsFile -Raw -Encoding UTF8
-        $prefs = $json | ConvertFrom-Json
+        $prefs = Get-Content -Path $PrefsFile -Raw -Encoding UTF8 | ConvertFrom-Json
 
-        # Ensure path exists
         if (-not $prefs.profile.PSObject.Properties['content_settings']) {
             $prefs.profile | Add-Member -NotePropertyName 'content_settings' -NotePropertyValue ([PSCustomObject]@{}) -Force
         }
@@ -147,7 +179,7 @@ function Set-BrowserPermissions {
 
         $cs = $prefs.profile.content_settings.exceptions
 
-        # ── Step 1: Remove old entries for all 3 sites across all permission types ──
+        # Remove old permission entries for only the 3 Railway sites
         foreach ($permType in $PermissionTypesToClear) {
             if ($cs.PSObject.Properties[$permType]) {
                 $entries = $cs.PSObject.Properties[$permType].Value
@@ -161,57 +193,118 @@ function Set-BrowserPermissions {
                 }
             }
         }
-        Write-Info "Old permission entries removed for all 3 sites."
+        Write-Info "Old Railway site permissions removed."
 
-        # ── Step 2: Pre-set window_placement = 1 (ALLOW) for all 3 sites ──
+        # Pre-set window_placement = 1 (Allow) for all 3 sites
         if (-not $cs.PSObject.Properties['window_placement']) {
             $cs | Add-Member -NotePropertyName 'window_placement' -NotePropertyValue ([PSCustomObject]@{}) -Force
         }
-
         $wp = $cs.window_placement
         foreach ($siteEntry in $SitePermissionKeys) {
-            $permEntry = [PSCustomObject]@{
+            $wp | Add-Member -NotePropertyName $siteEntry -NotePropertyValue ([PSCustomObject]@{
                 last_modified = '13000000000000000'
-                setting       = 1   # 1 = Allow, 2 = Block
-            }
-            $wp | Add-Member -NotePropertyName $siteEntry -NotePropertyValue $permEntry -Force
+                setting       = 1
+            }) -Force
         }
-        Write-Info "window_placement set to ALLOW for all 3 sites."
+        Write-Info "'Access to apps/services' pre-set to ALLOW for all 3 sites."
 
-        # ── Save ──
         $prefs | ConvertTo-Json -Depth 100 | Set-Content -Path $PrefsFile -Encoding UTF8
-        Write-OK "$BrowserName permissions fixed — 'Access to apps/services' = ALLOWED."
+        Write-OK "$BrowserName done. Permission popup will NOT appear on next visit."
 
     } catch {
-        Write-Warn "Could not update $BrowserName Preferences: $_"
-        Write-Info "Restoring backup..."
-        Copy-Item -Path $BackupFile -Destination $PrefsFile -Force
+        Write-Warn "Error modifying $BrowserName Preferences: $_"
+        Write-Info "Restoring from backup..."
+        Copy-Item -Path "$PrefsFile.backup" -Destination $PrefsFile -Force
     }
 }
 
 # ─────────────────────────────────────────────
-# SUMMARY FOOTER
+# FIREFOX — Clear Railway site data only
+# ─────────────────────────────────────────────
+function Clear-FirefoxSiteData {
+    if (-not (Test-Path $FirefoxBase)) {
+        Write-Skip "Firefox is not installed or profile folder not found."
+        return
+    }
+
+    $profiles = Get-ChildItem -Path $FirefoxBase -Directory -ErrorAction SilentlyContinue
+    if (-not $profiles) {
+        Write-Skip "No Firefox profiles found."
+        return
+    }
+
+    $ffRunning = [bool](Get-Process -Name 'firefox' -ErrorAction SilentlyContinue)
+    if ($ffRunning) {
+        Write-Warn "Firefox is open. SQLite databases cannot be safely edited while running."
+        Write-Info "Cache folders will still be cleared."
+        Write-Info "For full cookie/permission reset: close Firefox and re-run this script."
+    }
+
+    $sqlite = Get-Command 'sqlite3' -ErrorAction SilentlyContinue
+
+    foreach ($profile in $profiles) {
+        Write-Info "Firefox profile: $($profile.Name)"
+
+        # Clear network cache (safe even if Firefox is open)
+        $cacheDir = Join-Path $profile.FullName 'cache2'
+        if (Test-Path $cacheDir) {
+            Remove-Item -Path $cacheDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Info "Cache2 cleared."
+        }
+
+        if (-not $ffRunning) {
+            # Cookies
+            $cookiesDb = Join-Path $profile.FullName 'cookies.sqlite'
+            if ((Test-Path $cookiesDb) -and $sqlite) {
+                Copy-Item $cookiesDb "$cookiesDb.backup" -Force
+                foreach ($site in $SiteKeys) {
+                    & sqlite3 $cookiesDb "DELETE FROM moz_cookies WHERE host LIKE '%$site%';" 2>$null
+                }
+                Write-Info "Cookies cleared for Railway sites."
+            }
+
+            # Permissions
+            $permDb = Join-Path $profile.FullName 'permissions.sqlite'
+            if ((Test-Path $permDb) -and $sqlite) {
+                Copy-Item $permDb "$permDb.backup" -Force
+                foreach ($site in $SiteKeys) {
+                    & sqlite3 $permDb "DELETE FROM moz_perms WHERE origin LIKE '%$site%';" 2>$null
+                }
+                Write-Info "Firefox permissions cleared for Railway sites."
+            }
+
+            if (-not $sqlite) {
+                Write-Warn "sqlite3.exe not in PATH — cookie/permission DBs skipped."
+                Write-Info "To clear manually in Firefox: Ctrl+Shift+Del > Cookies for Railway sites."
+            }
+        }
+    }
+    Write-OK "Firefox processing complete."
+}
+
+# ─────────────────────────────────────────────
+# SUMMARY
 # ─────────────────────────────────────────────
 function Write-Summary {
     Write-Host ""
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host "  ALL DONE! Summary" -ForegroundColor Cyan
-    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  +================================================+" -ForegroundColor Green
+    Write-Host "  |              ALL DONE!  Summary                |" -ForegroundColor Green
+    Write-Host "  +================================================+" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Cache Cleared       : Chrome & Edge" -ForegroundColor Green
+    Write-Host "  [OK] Cache cleared        : Chrome, Edge, Firefox" -ForegroundColor Green
+    Write-Host "  [OK] Permissions reset    : Only the 3 Railway sites" -ForegroundColor Green
+    Write-Host "  [OK] Allow pre-approved   : No more Allow/Block popup!" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Permissions fixed for:" -ForegroundColor Green
-    Write-Host "    * https://aims.indianrailways.gov.in" -ForegroundColor White
-    Write-Host "    * https://www.ireps.gov.in" -ForegroundColor White
-    Write-Host "    * https://ircep.gov.in" -ForegroundColor White
+    Write-Host "  Sites fixed:" -ForegroundColor White
+    Write-Host "    * https://aims.indianrailways.gov.in" -ForegroundColor Cyan
+    Write-Host "    * https://www.ireps.gov.in"           -ForegroundColor Cyan
+    Write-Host "    * https://ircep.gov.in"               -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  [ALLOWED] Access to other apps & services" -ForegroundColor Green
-    Write-Host "            No more Allow/Block popup!" -ForegroundColor Green
+    Write-Host "  Backup files saved as  Preferences.backup" -ForegroundColor DarkGray
+    Write-Host "  (Chrome & Edge profile folders)"           -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  Backup : Preferences.backup (Chrome & Edge)" -ForegroundColor DarkGray
-    Write-Host "============================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  Open Chrome or Edge and visit the sites." -ForegroundColor Yellow
+    Write-Host "  ------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "  Open your browser and visit the sites." -ForegroundColor Yellow
     Write-Host "  Enjoy Work!" -ForegroundColor Yellow
     Write-Host ""
 }
@@ -220,32 +313,31 @@ function Write-Summary {
 # MAIN
 # ─────────────────────────────────────────────
 Write-Header
+Show-BrowserWarning
 
-# Step 0 — Close browsers
-Write-Step "0/4" "Checking for running browsers..."
-Close-Browser -ProcessName 'chrome'  -DisplayName 'Google Chrome'
-Close-Browser -ProcessName 'msedge'  -DisplayName 'Microsoft Edge'
+Write-Step "1/6" "Clearing Google Chrome cache..."
+Clear-ChromiumCache -ProfilePath $ChromeProfile -BrowserName 'Chrome'
 Write-Host ""
 
-# Step 1 — Chrome cache
-Write-Step "1/4" "Clearing Google Chrome cache..."
-Clear-BrowserCache -ProfilePath $ChromeProfile -BrowserName 'Chrome'
+Write-Step "2/6" "Fixing Chrome permissions for Railway sites..."
+Set-ChromiumPermissions -ProfilePath $ChromeProfile -BrowserName 'Chrome'
 Write-Host ""
 
-# Step 2 — Chrome permissions
-Write-Step "2/4" "Fixing Chrome permissions for Railway sites..."
-Set-BrowserPermissions -ProfilePath $ChromeProfile -BrowserName 'Chrome'
+Write-Step "3/6" "Clearing Microsoft Edge cache..."
+Clear-ChromiumCache -ProfilePath $EdgeProfile -BrowserName 'Edge'
 Write-Host ""
 
-# Step 3 — Edge cache
-Write-Step "3/4" "Clearing Microsoft Edge cache..."
-Clear-BrowserCache -ProfilePath $EdgeProfile -BrowserName 'Edge'
+Write-Step "4/6" "Fixing Edge permissions for Railway sites..."
+Set-ChromiumPermissions -ProfilePath $EdgeProfile -BrowserName 'Edge'
 Write-Host ""
 
-# Step 4 — Edge permissions
-Write-Step "4/4" "Fixing Edge permissions for Railway sites..."
-Set-BrowserPermissions -ProfilePath $EdgeProfile -BrowserName 'Edge'
+Write-Step "5/6" "Processing Mozilla Firefox..."
+Clear-FirefoxSiteData
+Write-Host ""
+
+Write-Step "6/6" "Finalizing..."
+Write-OK "All done."
+Write-Host ""
 
 Write-Summary
-
-Read-Host "Press Enter to exit"
+Read-Host "  Press Enter to exit"
